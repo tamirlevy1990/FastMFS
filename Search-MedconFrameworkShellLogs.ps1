@@ -634,18 +634,20 @@ function Get-ZipDateRange {
         $startStr = $matches[1]
         $endStr   = $matches[2]
 
-        $zipStart = $null
-        $zipEnd   = $null
+        [datetime]$zipStart = [datetime]::MinValue
+        [datetime]$zipEnd   = [datetime]::MinValue
+        $okStart = $false
+        $okEnd   = $false
 
-        $formats = @('d.M.yyyy', 'dd.MM.yyyy', 'M.d.yyyy', 'dd.M.yyyy', 'd.MM.yyyy')
-        foreach ($fmt in $formats) {
-            if ([datetime]::TryParseExact($startStr, $fmt, [System.Globalization.CultureInfo]::InvariantCulture, 'None', [ref]$zipStart)) { break }
-        }
-        foreach ($fmt in $formats) {
-            if ([datetime]::TryParseExact($endStr, $fmt, [System.Globalization.CultureInfo]::InvariantCulture, 'None', [ref]$zipEnd)) { break }
-        }
+        $formats = [string[]]@('d.M.yyyy', 'dd.MM.yyyy', 'M.d.yyyy', 'dd.M.yyyy', 'd.MM.yyyy')
+        $culture = [System.Globalization.CultureInfo]::InvariantCulture
+        $style   = [System.Globalization.DateTimeStyles]::None
 
-        if ($null -ne $zipStart -and $null -ne $zipEnd) {
+        # TryParseExact with string[] of formats - parses in one call
+        $okStart = [datetime]::TryParseExact($startStr, $formats, $culture, $style, [ref]$zipStart)
+        $okEnd   = [datetime]::TryParseExact($endStr,   $formats, $culture, $style, [ref]$zipEnd)
+
+        if ($okStart -and $okEnd) {
             return @{ Start = $zipStart.Date; End = $zipEnd.Date }
         }
     }
