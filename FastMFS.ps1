@@ -1,10 +1,12 @@
 # Search-MedconLogs-GUI.ps1
 # v2 — Redesigned UI: groupboxes, date presets, toolbar, splitter, responsive layout
+# v2.1 — Fix: archive extraction (stream copy instead of ZipFileExtensions, PS 5.1/7 compatible)
 # Run:  powershell -ExecutionPolicy Bypass -File ".\Search-MedconLogs-GUI.ps1"
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.IO.Compression
+Add-Type -AssemblyName System.IO.Compression.FileSystem  
 
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
@@ -841,7 +843,18 @@ function Extract-ArchiveLogs {
             foreach ($entry in $matchingEntries) {
                 try {
                     $target = Join-Path $zipDestRoot $entry.Name
-                    [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $target, $true)
+                    $entryStream = $null
+                    $fileStream  = $null
+                    try {
+                        $entryStream = $entry.Open()
+                        $fileStream  = [System.IO.FileStream]::new($target,
+                            [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+                        $entryStream.CopyTo($fileStream)
+                    }
+                    finally {
+                        if ($fileStream)  { $fileStream.Dispose() }
+                        if ($entryStream) { $entryStream.Dispose() }
+                    }                        
                     Write-Activity "Extracted: $($entry.Name)" -Level Detail
                     $extracted++
                 } catch {
