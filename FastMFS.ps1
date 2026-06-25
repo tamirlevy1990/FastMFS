@@ -1,7 +1,7 @@
 # Search-MedconLogs-GUI.ps1
 # Windows PowerShell 5.1+ / PowerShell 7+ (WinForms)
 # ──────────────────────────────────────────────────────
-# v5 — Date range + Smart zip filtering + Activity log
+# v6 — Date range + Smart zip filtering + Activity log + Download Logs
 # Run:  powershell -ExecutionPolicy Bypass -File ".\Search-MedconLogs-GUI.ps1"
 # ──────────────────────────────────────────────────────
 
@@ -195,8 +195,20 @@ $btnClear.FlatAppearance.BorderSize = 0
 $btnClear.Cursor    = [System.Windows.Forms.Cursors]::Hand
 $panelInput.Controls.Add($btnClear)
 
+$btnDownload = New-Object System.Windows.Forms.Button
+$btnDownload.Text      = 'Download Logs'
+$btnDownload.Font      = $fontBold
+$btnDownload.ForeColor = [System.Drawing.Color]::White
+$btnDownload.BackColor = $archiveColor
+$btnDownload.Location  = New-Object System.Drawing.Point(440, 120)
+$btnDownload.Size      = New-Object System.Drawing.Size(120, 32)
+$btnDownload.FlatStyle = 'Flat'
+$btnDownload.FlatAppearance.BorderSize = 0
+$btnDownload.Cursor    = [System.Windows.Forms.Cursors]::Hand
+$panelInput.Controls.Add($btnDownload)
+
 $lblArchiveNote = New-Object System.Windows.Forms.Label
-$lblArchiveNote.Text      = 'Falls back to LogArchive zips if no files in main folder (smart zip filtering by filename dates)'
+$lblArchiveNote.Text      = 'Search scans LogEx + LogArchive. Download copies the full log files locally.'
 $lblArchiveNote.Font      = $fontSmall
 $lblArchiveNote.ForeColor = [System.Drawing.Color]::Gray
 $lblArchiveNote.Location  = New-Object System.Drawing.Point(130, 158)
@@ -443,7 +455,7 @@ $form.Controls.Add($dgv)
 
 @(
     @{ Name = 'Station';     Header = 'Station';       Width = 140  },
-    @{ Name = 'Source';      Header = 'Source';         Width = 80   },
+    @{ Name = 'Source';      Header = 'Source';        Width = 80   },
     @{ Name = 'FileName';    Header = 'File Name';     Width = 250  },
     @{ Name = 'FileDate';    Header = 'File Date';     Width = 130  },
     @{ Name = 'LineNumber';  Header = 'Line #';        Width = 65   },
@@ -523,13 +535,14 @@ $menuCopyAll.Add_Click({
 #  TOOLTIPS
 # ══════════════════════════════════════════════
 $toolTip = New-Object System.Windows.Forms.ToolTip
-$toolTip.SetToolTip($dtpDateFrom, 'Start date - files modified on or after this date')
-$toolTip.SetToolTip($dtpDateTo,   'End date - files modified on or before this date (same as From for single day)')
-$toolTip.SetToolTip($txtSearch,   'Case-insensitive text search inside log lines')
-$toolTip.SetToolTip($txtStations, 'Type or paste station hostnames, one per line')
-$toolTip.SetToolTip($btnLoadFile, 'Load station names from a .txt file')
-$toolTip.SetToolTip($txtFilter,   'Type here to filter results across all columns')
-$toolTip.SetToolTip($txtOutput,   'Folder where the CSV will be saved')
+$toolTip.SetToolTip($dtpDateFrom,  'Start date - files modified on or after this date')
+$toolTip.SetToolTip($dtpDateTo,    'End date - files modified on or before this date (same as From for single day)')
+$toolTip.SetToolTip($txtSearch,    'Case-insensitive text search inside log lines')
+$toolTip.SetToolTip($txtStations,  'Type or paste station hostnames, one per line')
+$toolTip.SetToolTip($btnLoadFile,  'Load station names from a .txt file')
+$toolTip.SetToolTip($txtFilter,    'Type here to filter results across all columns')
+$toolTip.SetToolTip($txtOutput,    'Folder where the CSV / downloaded logs will be saved')
+$toolTip.SetToolTip($btnDownload,  'Copy the full Medcon.Framework.Shell* log files for the selected date range to a local folder')
 
 # ══════════════════════════════════════════════
 #  SHARED STATE
@@ -577,7 +590,6 @@ function Write-Activity {
 }
 
 function Get-StationList {
-    # Split on newlines, spaces, commas, semicolons, tabs - any whitespace or separator
     $rawText = $txtStations.Text
     $tokens  = $rawText -split '[\s,;]+'
 
@@ -624,7 +636,6 @@ function Update-RowCount {
     else { $statusRowCount.Text = "Showing: $visible / $total" }
 }
 
-# ── Parse zip filename dates ──
 function Get-ZipDateRange {
     param([string]$ZipName)
 
@@ -636,14 +647,11 @@ function Get-ZipDateRange {
 
         [datetime]$zipStart = [datetime]::MinValue
         [datetime]$zipEnd   = [datetime]::MinValue
-        $okStart = $false
-        $okEnd   = $false
 
         $formats = [string[]]@('d.M.yyyy', 'dd.MM.yyyy', 'M.d.yyyy', 'dd.M.yyyy', 'd.MM.yyyy')
         $culture = [System.Globalization.CultureInfo]::InvariantCulture
         $style   = [System.Globalization.DateTimeStyles]::None
 
-        # TryParseExact with string[] of formats - parses in one call
         $okStart = [datetime]::TryParseExact($startStr, $formats, $culture, $style, [ref]$zipStart)
         $okEnd   = [datetime]::TryParseExact($endStr,   $formats, $culture, $style, [ref]$zipEnd)
 
@@ -762,9 +770,9 @@ function Search-ArchiveZips {
 
     if ($zipFiles.Count -eq 0) { return $false }
 
-    $foundAny      = $false
-    $zipsChecked   = 0
-    $zipsSkipped   = 0
+    $foundAny       = $false
+    $zipsChecked    = 0
+    $zipsSkipped    = 0
     $zipsUnparsable = 0
 
     foreach ($zipFile in $zipFiles) {
@@ -848,6 +856,125 @@ function Search-ArchiveZips {
     return $foundAny
 }
 
+function Copy-PlainLogs {
+    param(
+        [string]$UncPath,
+        [string]$Station,
+        [datetime]$DateFrom,
+        [datetime]$DateTo,
+        [string]$DestFolder,
+        [System.Collections.Generic.List[string]]$Problems
+    )
+
+    if (-not (Test-Path -LiteralPath $UncPath)) {
+        Write-Activity "Main folder not accessible: $UncPath" -Level Warning
+        return 0
+    }
+
+    $allFiles = @(Get-ChildItem -LiteralPath $UncPath -File -Filter 'Medcon.Framework.Shell*' -ErrorAction SilentlyContinue)
+    $files    = @($allFiles | Where-Object { $_.LastWriteTime.Date -ge $DateFrom -and $_.LastWriteTime.Date -le $DateTo })
+
+    Write-Activity "Main folder: $($files.Count) file(s) match date range" -Level Detail
+    if ($files.Count -eq 0) { return 0 }
+
+    if (-not (Test-Path -LiteralPath $DestFolder)) {
+        [void](New-Item -ItemType Directory -Path $DestFolder -Force)
+    }
+
+    $copied = 0
+    foreach ($file in $files) {
+        try {
+            $target = Join-Path $DestFolder $file.Name
+            Copy-Item -LiteralPath $file.FullName -Destination $target -Force -ErrorAction Stop
+            $sizeMB = [math]::Round($file.Length / 1MB, 2)
+            Write-Activity "Copied: $($file.Name) ($sizeMB MB)" -Level Detail
+            $copied++
+        }
+        catch {
+            Write-Activity "Failed copying $($file.Name): $($_.Exception.Message)" -Level Error
+            $Problems.Add("$Station - $($file.Name): $($_.Exception.Message)")
+        }
+        [System.Windows.Forms.Application]::DoEvents()
+    }
+    return $copied
+}
+
+function Extract-ArchiveLogs {
+    param(
+        [string]$ArchivePath,
+        [string]$Station,
+        [datetime]$DateFrom,
+        [datetime]$DateTo,
+        [string]$DestFolder,
+        [System.Collections.Generic.List[string]]$Problems
+    )
+
+    if (-not (Test-Path -LiteralPath $ArchivePath)) {
+        Write-Activity "Archive folder not accessible: $ArchivePath" -Level Warning
+        return 0
+    }
+
+    $zipFiles = @(Get-ChildItem -LiteralPath $ArchivePath -File -Filter '*.zip' -ErrorAction SilentlyContinue)
+    if ($zipFiles.Count -eq 0) { return 0 }
+
+    $extracted = 0
+    foreach ($zipFile in $zipFiles) {
+        $zipRange = Get-ZipDateRange -ZipName $zipFile.Name
+        if ($null -ne $zipRange) {
+            if (-not (Test-DateRangesOverlap -SearchFrom $DateFrom -SearchTo $DateTo -ZipFrom $zipRange.Start -ZipTo $zipRange.End)) {
+                continue
+            }
+        }
+
+        $zipStream = $null
+        $archive   = $null
+        try {
+            $zipStream = [System.IO.FileStream]::new($zipFile.FullName,
+                [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+            $archive = [System.IO.Compression.ZipArchive]::new($zipStream, [System.IO.Compression.ZipArchiveMode]::Read)
+
+            $matchingEntries = @($archive.Entries | Where-Object {
+                $_.Name -like 'Medcon.Framework.Shell*' -and
+                $_.LastWriteTime.Date -ge $DateFrom -and
+                $_.LastWriteTime.Date -le $DateTo
+            })
+
+            if ($matchingEntries.Count -eq 0) { continue }
+
+            $zipBaseName = [System.IO.Path]::GetFileNameWithoutExtension($zipFile.Name)
+            $zipDestRoot = Join-Path $DestFolder ("Archive_" + $zipBaseName)
+            if (-not (Test-Path -LiteralPath $zipDestRoot)) {
+                [void](New-Item -ItemType Directory -Path $zipDestRoot -Force)
+            }
+
+            Write-Activity "Extracting from $($zipFile.Name): $($matchingEntries.Count) entry(ies)" -Level Detail
+
+            foreach ($entry in $matchingEntries) {
+                try {
+                    $target = Join-Path $zipDestRoot $entry.Name
+                    [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $target, $true)
+                    Write-Activity "Extracted: $($entry.Name)" -Level Detail
+                    $extracted++
+                }
+                catch {
+                    Write-Activity "Failed extracting $($entry.Name): $($_.Exception.Message)" -Level Error
+                    $Problems.Add("$Station - $($zipFile.Name) > $($entry.Name): $($_.Exception.Message)")
+                }
+                [System.Windows.Forms.Application]::DoEvents()
+            }
+        }
+        catch {
+            Write-Activity "Error opening $($zipFile.Name): $($_.Exception.Message)" -Level Error
+            $Problems.Add("$Station - $($zipFile.Name): $($_.Exception.Message)")
+        }
+        finally {
+            if ($archive)   { $archive.Dispose()   }
+            if ($zipStream) { $zipStream.Dispose() }
+        }
+    }
+    return $extracted
+}
+
 # ══════════════════════════════════════════════
 #  EVENT HANDLERS
 # ══════════════════════════════════════════════
@@ -886,7 +1013,7 @@ $btnSortStations.Add_Click({
 
 $btnBrowseOutput.Add_Click({
     $fbd = New-Object System.Windows.Forms.FolderBrowserDialog
-    $fbd.Description  = 'Select output folder for CSV'
+    $fbd.Description  = 'Select output folder'
     $fbd.SelectedPath = $txtOutput.Text
     if ($fbd.ShowDialog() -eq 'OK') {
         $txtOutput.Text = $fbd.SelectedPath
@@ -923,6 +1050,121 @@ $txtFilter.Add_TextChanged({
     }
     $dgv.ResumeLayout()
     Update-RowCount
+})
+
+# ── Download Logs ──
+$btnDownload.Add_Click({
+
+    $stations = @(Get-StationList)
+    if ($stations.Count -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show('Please enter at least one station name.', 'Missing Input', 'OK', 'Warning')
+        return
+    }
+    if ([string]::IsNullOrWhiteSpace($txtOutput.Text) -or -not (Test-Path -LiteralPath $txtOutput.Text)) {
+        [System.Windows.Forms.MessageBox]::Show('Please select a valid output folder.', 'Missing Input', 'OK', 'Warning')
+        return
+    }
+
+    $dateFrom = $dtpDateFrom.Value.Date
+    $dateTo   = $dtpDateTo.Value.Date
+    if ($dateTo -lt $dateFrom) {
+        [System.Windows.Forms.MessageBox]::Show('"Date To" cannot be earlier than "Date From".', 'Invalid Range', 'OK', 'Warning')
+        return
+    }
+
+    $daySpan = ($dateTo - $dateFrom).Days + 1
+    if ($daySpan -gt 31) {
+        $confirm = [System.Windows.Forms.MessageBox]::Show(
+            "You selected $daySpan days. Downloading may be slow and use a lot of disk space.`nContinue?",
+            'Large Range', 'YesNo', 'Question')
+        if ($confirm -ne 'Yes') { return }
+    }
+
+    $dateTag    = if ($dateFrom -eq $dateTo) { $dateFrom.ToString('yyyyMMdd') }
+                  else { "$($dateFrom.ToString('yyyyMMdd'))-$($dateTo.ToString('yyyyMMdd'))" }
+    $timestamp  = (Get-Date).ToString('yyyyMMdd_HHmmss')
+    $rootFolder = Join-Path $txtOutput.Text ("MedconLogs_{0}_{1}" -f $dateTag, $timestamp)
+    [void](New-Item -ItemType Directory -Path $rootFolder -Force)
+
+    $btnSearch.Enabled    = $false
+    $btnDownload.Enabled  = $false
+    $progressBar.Value    = 0
+    $progressBar.Maximum  = $stations.Count
+    $lblStatus.ForeColor  = $accentColor
+
+    $problems   = [System.Collections.Generic.List[string]]::new()
+    $totalFiles = 0
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+
+    Write-Activity "===========================================" -Level Step
+    Write-Activity "DOWNLOAD STARTED" -Level Step
+    Write-Activity "Date range: $($dateFrom.ToString('yyyy-MM-dd')) to $($dateTo.ToString('yyyy-MM-dd')) ($daySpan day(s))" -Level Info
+    Write-Activity "Destination: $rootFolder" -Level Info
+    Write-Activity "Stations: $($stations.Count)" -Level Info
+    Write-Activity "===========================================" -Level Step
+
+    for ($i = 0; $i -lt $stations.Count; $i++) {
+        $station = $stations[$i]
+        $progressBar.Value = $i + 1
+        $lblStatus.Text    = "Downloading $station ($($i+1) of $($stations.Count))..."
+        [System.Windows.Forms.Application]::DoEvents()
+
+        Write-Activity "" -Level Info
+        Write-Activity "[$($i+1)/$($stations.Count)] Station: $station" -Level Step
+
+        $stationFolder = Join-Path $rootFolder $station
+        $uncPath       = "\\$station\d`$\TCS_Logs\LogEx"
+        $archivePath   = "\\$station\d`$\TCS_Logs\LogEx\LogArchive\Medcon.Framework.Shell"
+
+        $copied    = Copy-PlainLogs    -UncPath $uncPath -Station $station `
+                        -DateFrom $dateFrom -DateTo $dateTo `
+                        -DestFolder $stationFolder -Problems $problems
+
+        $extracted = Extract-ArchiveLogs -ArchivePath $archivePath -Station $station `
+                        -DateFrom $dateFrom -DateTo $dateTo `
+                        -DestFolder $stationFolder -Problems $problems
+
+        $stationTotal = $copied + $extracted
+        $totalFiles  += $stationTotal
+
+        if ($stationTotal -eq 0) {
+            Write-Activity "No files for $station in the date range" -Level Warning
+            if (Test-Path -LiteralPath $stationFolder) {
+                $hasContent = @(Get-ChildItem -LiteralPath $stationFolder -Recurse -ErrorAction SilentlyContinue).Count -gt 0
+                if (-not $hasContent) { Remove-Item -LiteralPath $stationFolder -Recurse -Force -ErrorAction SilentlyContinue }
+            }
+        } else {
+            Write-Activity "Station done: $copied from LogEx, $extracted from Archive" -Level Success
+        }
+    }
+
+    $sw.Stop()
+    $elapsed = $sw.Elapsed.ToString('mm\:ss\.f')
+
+    $lblStatus.Text      = "Download done in $elapsed  -  $totalFiles file(s), $($problems.Count) problem(s)"
+    $lblStatus.ForeColor = if ($totalFiles -gt 0) { $successColor } else { [System.Drawing.Color]::OrangeRed }
+    $statusLabel.Text    = "  Downloaded $totalFiles file(s) to $rootFolder"
+
+    Write-Activity "" -Level Info
+    Write-Activity "===========================================" -Level Step
+    Write-Activity "DOWNLOAD COMPLETE - $totalFiles file(s) in $elapsed" -Level Success
+    Write-Activity "Location: $rootFolder" -Level Info
+    Write-Activity "===========================================" -Level Step
+
+    $btnSearch.Enabled   = $true
+    $btnDownload.Enabled = $true
+
+    if ($totalFiles -gt 0) {
+        $open = [System.Windows.Forms.MessageBox]::Show(
+            "Downloaded $totalFiles file(s).`nOpen the folder now?",
+            'Download Complete', 'YesNo', 'Question')
+        if ($open -eq 'Yes') { Invoke-Item $rootFolder }
+    } elseif ($problems.Count -gt 0) {
+        $msg = "No files were downloaded.`n`n" + ($problems -join "`n")
+        [System.Windows.Forms.MessageBox]::Show($msg, 'Problems', 'OK', 'Warning')
+    } else {
+        [System.Windows.Forms.MessageBox]::Show('No matching files found in the selected date range.', 'No Files', 'OK', 'Information')
+    }
 })
 
 # ── Main Search ──
@@ -962,6 +1204,7 @@ $btnSearch.Add_Click({
     $dgv.Rows.Clear()
     $txtFilter.Text      = ''
     $btnSearch.Enabled   = $false
+    $btnDownload.Enabled = $false
     $btnExport.Enabled   = $false
     $progressBar.Value   = 0
     $lblStatus.ForeColor = $accentColor
@@ -999,8 +1242,8 @@ $btnSearch.Add_Click({
         $uncPath     = "\\$station\d`$\TCS_Logs\LogEx"
         $archivePath = "\\$station\d`$\TCS_Logs\LogEx\LogArchive\Medcon.Framework.Shell"
 
-        $foundInMain    = $false
-        $foundInArchive = $false
+        $foundInMain      = $false
+        $foundInArchive   = $false
         $stationReachable = $false
 
         # 1) Search main LogEx folder
@@ -1039,7 +1282,6 @@ $btnSearch.Add_Click({
             Write-Activity "No matches found for $station in date range" -Level Warning
         }
 
-
         $stationSw.Stop()
         $stationMatches = $results.Count - $matchesBefore
         Write-Activity "Station done in $($stationSw.Elapsed.ToString('mm\:ss\.f')) - $stationMatches new match(es)" -Level Success
@@ -1071,8 +1313,9 @@ $btnSearch.Add_Click({
     }
     Write-Activity "===========================================" -Level Step
 
-    $btnSearch.Enabled = $true
-    $btnExport.Enabled = ($results.Count -gt 0)
+    $btnSearch.Enabled   = $true
+    $btnDownload.Enabled = $true
+    $btnExport.Enabled   = ($results.Count -gt 0)
     Update-RowCount
 
     foreach ($row in $dgv.Rows) {
